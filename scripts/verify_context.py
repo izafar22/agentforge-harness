@@ -97,6 +97,10 @@ def validate(project, checkpoint):
     if not isinstance(checkpoint["blockers"], list):
         raise ValueError("blockers must be a list")
     required(checkpoint["next_action"], ("type", "description"), "next_action")
+    for name in ("type", "description"):
+        value = checkpoint["next_action"][name]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"next_action.{name} must be a nonempty string")
     required(checkpoint["verification"], ("status", "verified_at"), "verification")
     if checkpoint["verification"]["status"] not in ("verified", "unverified", "conflict"):
         raise ValueError("invalid verification status")
@@ -142,10 +146,13 @@ def inspect(root):
         issues.append("UNKNOWN: checkpoint has no last_verified_commit baseline")
     exists = None
     if claimed:
-        exists = git(root, "cat-file", "-t", claimed) == "commit"
-        if not exists:
+        object_type = git(root, "cat-file", "-t", claimed)
+        exists = object_type == "commit" if object_type is not None else None
+        if object_type is None:
+            issues.append("UNKNOWN: cannot inspect checkpoint commit object")
+        elif not exists:
             baseline_status = "CONFLICT"
-            issues.append("CONFLICT: checkpoint references a commit not found locally")
+            issues.append("CONFLICT: checkpoint SHA does not refer to a commit")
         elif head != claimed:
             baseline_status = "CONFLICT"
             issues.append("CONFLICT: checkpoint commit differs from HEAD")

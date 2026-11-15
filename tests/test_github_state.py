@@ -83,10 +83,10 @@ class GitHubReconciliationTests(unittest.TestCase):
 
     def test_second_pr_page_ambiguity(self):
         p = {"head": {"sha": SHA, "ref": "feature/test", "repo": {"full_name": "example/repo"}}, "number": 1, "draft": False, "state": "open"}
-        other = {"head": {"sha": "b" * 40}}
+        other = {"head": {"sha": "b" * 40}, "number": 2, "draft": False, "state": "open", "merged_at": None}
         def second(repo, path, token):
             if path.startswith("pulls?"):
-                return ([p] + [other] * 99 if "&page=1" in path else [dict(p, number=2)]), None
+                return ([p] + [dict(other, number=i) for i in range(2, 101)] if "&page=1" in path else [dict(p, number=101)]), None
             return fake(repo, path, token)
         result = gh.reconcile("example/repo", "feature/test", SHA, fetch=second)
         self.assertEqual(result["pull_requests"], "AMBIGUOUS")
@@ -278,6 +278,91 @@ class GitHubReconciliationTests(unittest.TestCase):
         self.assertEqual(evidence["head"], "VERIFIED")
         self.assertEqual(evidence["pull_requests"], "UNKNOWN")
         self.assertEqual(evidence["ci"], "VERIFIED")
+
+
+    def test_missing_merged_at_is_unknown(self):
+        def missing(repo, path, token):
+            if path.startswith("pulls?"):
+                return [{"head": {"sha": SHA, "ref": "feature/test",
+                                  "repo": {"full_name": "example/repo"}},
+                         "number": 17, "state": "open", "draft": True}], None
+            return fake(repo, path, token)
+        result = gh.reconcile("example/repo", "feature/test", SHA, fetch=missing)
+        self.assertEqual(result["pull_requests"], "UNKNOWN")
+
+    def test_open_draft_with_merged_timestamp_is_unknown(self):
+        def contradictory(repo, path, token):
+            if path.startswith("pulls?"):
+                return [{"head": {"sha": SHA, "ref": "feature/test",
+                                  "repo": {"full_name": "example/repo"}},
+                         "number": 17, "state": "open", "draft": True,
+                         "merged_at": "2026-11-15T17:44:40Z"}], None
+            return fake(repo, path, token)
+        self.assertEqual(
+            gh.reconcile("example/repo", "feature/test", SHA, fetch=contradictory)["pull_requests"],
+            "UNKNOWN")
+
+    def test_duplicate_pr_number_across_different_shas_unknown(self):
+        def duplicated(repo, path, token):
+            if path.startswith("pulls?"):
+                return [
+                    {"head": {"sha": SHA, "ref": "feature/test",
+                              "repo": {"full_name": "example/repo"}},
+                     "number": 17, "state": "open", "draft": True, "merged_at": None},
+                    {"head": {"sha": "b" * 40, "ref": "feature/test",
+                              "repo": {"full_name": "example/repo"}},
+                     "number": 17, "state": "open", "draft": False, "merged_at": None}
+                ], None
+            return fake(repo, path, token)
+        self.assertEqual(
+            gh.reconcile("example/repo", "feature/test", SHA, fetch=duplicated)["pull_requests"],
+            "UNKNOWN")
+
+    def test_json_duplicate_sha_rejected_before_commit_verification(self):
+        import io
+        from unittest.mock import patch
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def geturl(self):
+                return "https://api.github.com/repos/example/repo/commits/" + SHA
+
+        class Opener:
+            def open(self, *args, **kwargs):
+                return Response(('{"sha":"' + "b" * 40 + '","sha":"' + SHA + '"}').encode())
+
+        with patch.object(gh.request, "build_opener", return_value=Opener()):
+            payload, issue = gh.api_get("example/repo", "commits/" + SHA)
+        self.assertIsNone(payload)
+        self.assertIn("ValueError", issue)
+
+    def test_extreme_json_nesting_returns_unknown_not_exception(self):
+        import io
+        from unittest.mock import patch
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def geturl(self):
+                return "https://api.github.com/repos/example/repo/commits/" + SHA
+
+        class Opener:
+            def open(self, *args, **kwargs):
+                return Response(("[" * 10000 + "0" + "]" * 10000).encode())
+
+        with patch.object(gh.request, "build_opener", return_value=Opener()):
+            payload, issue = gh.api_get("example/repo", "commits/" + SHA)
+        self.assertIsNone(payload)
+        self.assertIn("RecursionError", issue)
 
 if __name__ == "__main__":
     unittest.main()

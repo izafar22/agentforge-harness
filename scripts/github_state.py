@@ -8,6 +8,16 @@ from datetime import datetime
 from http.client import HTTPException
 from urllib import error, parse, request
 
+def reject_duplicate_json_keys(pairs):
+    """JSON object keys must be unique; last-key-wins would forge evidence."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON key")
+        result[key] = value
+    return result
+
+
 PAGE_SIZE = 100
 MAX_PAGES = 20
 
@@ -32,8 +42,8 @@ def api_get(repo, path, token=None):
         with opener.open(request.Request(url, headers=headers), timeout=10) as response:
             if response.geturl() != url:
                 return None, "GitHub API origin changed"
-            return json.load(response), None
-    except (error.URLError, TimeoutError, ValueError, OSError, HTTPException) as exc:
+            return json.load(response, object_pairs_hook=reject_duplicate_json_keys), None
+    except (error.URLError, TimeoutError, ValueError, OSError, HTTPException, RecursionError) as exc:
         return None, "GitHub API request failed: " + type(exc).__name__
 
 
@@ -46,7 +56,7 @@ def _pages(repo, endpoint, token, fetch, collection):
         path = endpoint + sep + parse.urlencode({"per_page": PAGE_SIZE, "page": page})
         try:
             payload, err = fetch(repo, path, token)
-        except (error.URLError, TimeoutError, ValueError, OSError, HTTPException) as exc:
+        except (error.URLError, TimeoutError, ValueError, OSError, HTTPException, RecursionError) as exc:
             return None, f"GitHub {collection} page {page} interrupted: {type(exc).__name__}"
         if err:
             return None, f"GitHub {collection} page {page} unavailable: {err}"
@@ -124,7 +134,7 @@ def reconcile(repo, branch, head, token=None, fetch=api_get):
         return evidence
     try:
         commit, err = fetch(repo, "commits/" + parse.quote(head, safe=""), token)
-    except (error.URLError, TimeoutError, ValueError, OSError, HTTPException) as exc:
+    except (error.URLError, TimeoutError, ValueError, OSError, HTTPException, RecursionError) as exc:
         commit, err = None, type(exc).__name__
     if err or not isinstance(commit, dict) or commit.get("sha") != head:
         evidence["issues"].append("Remote commit verification unavailable or mismatched")
@@ -138,6 +148,10 @@ def reconcile(repo, branch, head, token=None, fetch=api_get):
     elif any(not isinstance(p.get("head"), dict) or not isinstance(p["head"].get("sha"), str)
              for p in prs):
         evidence["issues"].append("PR verification UNKNOWN: malformed head metadata")
+    elif any(type(p.get("number")) is not int or p["number"] <= 0 for p in prs):
+        evidence["issues"].append("PR verification UNKNOWN: missing or invalid PR number")
+    elif len({p["number"] for p in prs}) != len(prs):
+        evidence["issues"].append("PR verification UNKNOWN: duplicate PR number in response")
     else:
         matches = [p for p in prs if p["head"]["sha"] == head]
         if len(matches) == 1:
@@ -146,7 +160,10 @@ def reconcile(repo, branch, head, token=None, fetch=api_get):
                 or type(p.get("number")) is not int or p["number"] <= 0
                 or p.get("state") not in ("open", "closed")
                 or type(p.get("draft")) is not bool
-                or not valid_github_timestamp(p.get("merged_at"))):
+                or "merged_at" not in p
+                or not valid_github_timestamp(p["merged_at"])
+                or (p["state"] == "open" and p["merged_at"] is not None)
+                or (p["merged_at"] is not None and p["state"] != "closed")):
                 evidence["issues"].append("PR verification UNKNOWN: invalid matching PR fields")
             else:
                 evidence["pull_requests"] = "VERIFIED"

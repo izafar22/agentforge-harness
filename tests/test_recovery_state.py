@@ -122,5 +122,36 @@ class RecoveryStateTests(unittest.TestCase):
                     resume.main()
         self.assertEqual(outcome.exception.code, 2)
 
+
+    def test_resume_rejects_nonstr_next_action_values(self):
+        project = verify.parse_simple_yaml((ROOT / "harness/project.yaml").read_text())
+        for bad in (None, False, []):
+            checkpoint = verify.parse_simple_yaml(
+                (ROOT / "harness/checkpoint.yaml").read_text())
+            checkpoint["next_action"]["description"] = bad
+            with self.subTest(value=bad):
+                with self.assertRaisesRegex(ValueError, "next_action.description"):
+                    verify.validate(project, checkpoint)
+
+    def test_unavailable_checkpoint_lookup_is_unknown_not_conflict(self):
+        checkpoint = (ROOT / "harness/checkpoint.yaml").read_text()
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "harness").mkdir()
+            (root / "harness/project.yaml").write_text(
+                (ROOT / "harness/project.yaml").read_text())
+            (root / "harness/checkpoint.yaml").write_text(
+                checkpoint.replace("last_verified_commit: null",
+                                   "last_verified_commit: " + SHA))
+            def fake(root, *args):
+                return {"symbolic-ref": "feature/phase1-memory-recovery",
+                        "rev-parse": SHA, "status": ""}.get(args[0])
+            with patch.object(verify, "git", side_effect=fake):
+                state = verify.inspect(root)
+        self.assertEqual(state["checkpoint_baseline_status"], "UNKNOWN")
+        self.assertIsNone(state["checkpoint_commit_exists"])
+        self.assertFalse(any("CONFLICT: checkpoint" in x for x in state["issues"]))
+
 if __name__ == "__main__":
     unittest.main()
