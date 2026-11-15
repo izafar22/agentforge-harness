@@ -108,11 +108,11 @@ def reconcile(repo, branch, head, token=None, fetch=api_get):
         matches = [p for p in prs if p["head"]["sha"] == head]
         if len(matches) == 1:
             p = matches[0]
-            if type(p.get("number")) is not int or p["number"] <= 0
-               or p.get("state") not in ("open", "closed")
-               or type(p.get("draft")) is not bool
-               or (p.get("merged_at") is not None and
-                   (not isinstance(p["merged_at"], str) or not p["merged_at"].strip())):
+            if (type(p.get("number")) is not int or p["number"] <= 0
+                or p.get("state") not in ("open", "closed")
+                or type(p.get("draft")) is not bool
+                or (p.get("merged_at") is not None and
+                    (not isinstance(p["merged_at"], str) or not p["merged_at"].strip()))):
                 evidence["issues"].append("PR verification UNKNOWN: invalid matching PR fields")
             else:
                 evidence["pull_requests"] = "VERIFIED"
