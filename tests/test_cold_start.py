@@ -39,7 +39,7 @@ class ColdStartTests(unittest.TestCase):
             result = resume.build(root)
             self.assertIn("HARNESS-001", result)
             self.assertIn("cold-start", result)
-            self.assertIn("REQUIRES INVESTIGATION", result)
+            self.assertIn("PARTIAL — CHECKPOINT OR LOCAL EVIDENCE UNKNOWN", result)
         finally:
             temp.cleanup()
 
