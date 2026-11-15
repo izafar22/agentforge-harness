@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Read-only validation and local Git inspection of AgentForge memory."""
+import argparse
+import json
+import re
+import subprocess
+from pathlib import Path
+
+
+def scalar(value, line):
+    if value in ("null", "~"):
+        return None
+    if value == "[]":
+        return []
+    if value in ("true", "false"):
+        return value == "true"
+    if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
+        return value[1:-1]
+    if value.startswith(("[", "{", "!")):
+        raise ValueError(f"line {line}: unsupported YAML scalar")
+    return value
+
+
+def parse_simple_yaml(text):
+    """Read only the restricted, two-space YAML subset used by this harness."""
+    root = {}
+    stack = [(-1, root)]
+    lines = text.splitlines()
+    for number, raw in enumerate(lines, 1):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        if "\t" in raw[:indent] or indent % 2:
+            raise ValueError(f"line {number}: invalid indentation")
+        item = raw.strip()
+        while len(stack) > 1 and indent <= stack[-1][0]:
+            stack.pop()
+        parent = stack[-1][1]
+        if item.startswith("- "):
+            if not isinstance(parent, list):
+                raise ValueError(f"line {number}: list without parent")
+            parent.append(scalar(item[2:], number))
+            continue
+        if not isinstance(parent, dict) or ":" not in item:
+            raise ValueError(f"line {number}: unsupported YAML")
+        key, val = item.split(":", 1)
+        key = key.strip()
+        if not re.fullmatch(r"[A-Za-z_][\w-]*", key) or key in parent:
+            raise ValueError(f"line {number}: invalid or duplicate key")
+        val = val.strip()
+        if val:
+            parent[key] = scalar(val, number)
+        else:
+            following = next((x.strip() for x in lines[number:] if x.strip() and not x.lstrip().startswith("#")), "")
+            parent[key] = [] if following.startswith("- ") else {}
+            stack.append((indent, parent[key]))
+    return root
+
+
+def required(mapping, keys, label):
+    if not isinstance(mapping, dict):
+        raise ValueError(f"{label} must be a mapping")
+    missing = set(keys) - set(mapping)
+    if missing:
+        raise ValueError(f"{label} missing: {', '.join(sorted(missing))}")
+
+
+def validate(project, checkpoint):
+    required(project, ("schema_version", "project", "repository", "policies"), "project")
+    required(checkpoint, ("schema_version", "task", "git", "progress", "blockers", "next_action", "verification"), "checkpoint")
+    for name, obj in (("project", project), ("checkpoint", checkpoint)):
+        if str(obj["schema_version"]) != "1":
+            raise ValueError(f"{name}: unsupported schema version")
+    required(project["project"], ("id", "name"), "project.project")
+    required(project["repository"], ("provider", "owner", "name", "default_branch"), "project.repository")
+    if project["repository"]["provider"] != "github":
+        raise ValueError("only GitHub is supported")
+    required(project["policies"], ("require_pr", "require_approval_for_merge", "require_approval_for_deploy"), "policies")
+    if any(type(project["policies"][k]) is not bool for k in ("require_pr", "require_approval_for_merge", "require_approval_for_deploy")):
+        raise ValueError("policies must be booleans")
+    required(checkpoint["task"], ("id", "title", "status"), "task")
+    if checkpoint["task"]["status"] not in ("not_started", "in_progress", "blocked", "completed"):
+        raise ValueError("invalid task status")
+    required(checkpoint["git"], ("base_branch", "work_branch", "last_verified_commit"), "git")
+    required(checkpoint["progress"], ("completed", "remaining"), "progress")
+    for key in ("completed", "remaining"):
+        if not isinstance(checkpoint["progress"][key], list) or not all(isinstance(x, str) for x in checkpoint["progress"][key]):
+            raise ValueError("progress entries must be string lists")
+    if not isinstance(checkpoint["blockers"], list):
+        raise ValueError("blockers must be a list")
+    required(checkpoint["next_action"], ("type", "description"), "next_action")
+    required(checkpoint["verification"], ("status", "verified_at"), "verification")
+    if checkpoint["verification"]["status"] not in ("verified", "unverified", "conflict"):
+        raise ValueError("invalid verification status")
+
+
+def git(root, *arguments):
+    result = subprocess.run(["git", "-C", str(root), *arguments], capture_output=True, text=True, check=False, timeout=10)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def inspect(root):
+    root = Path(root).resolve()
+    project = parse_simple_yaml((root / "harness/project.yaml").read_text(encoding="utf-8"))
+    checkpoint = parse_simple_yaml((root / "harness/checkpoint.yaml").read_text(encoding="utf-8"))
+    validate(project, checkpoint)
+    branch = git(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+    head = git(root, "rev-parse", "HEAD")
+    dirty = git(root, "status", "--porcelain")
+    issues = []
+    if head is None:
+        issues.append("Git HEAD unavailable")
+    if dirty is None:
+        issues.append("Cannot inspect working tree")
+    elif dirty:
+        issues.append("Working tree has uncommitted changes")
+    claimed = checkpoint["git"]["last_verified_commit"]
+    exists = None
+    if claimed:
+        exists = git(root, "cat-file", "-t", claimed) == "commit"
+        if not exists:
+            issues.append("Checkpoint references a commit not found locally")
+        elif head != claimed:
+            issues.append("Checkpoint commit differs from HEAD")
+    return {
+        "project": project["project"]["id"],
+        "repository": f'{project["repository"]["owner"]}/{project["repository"]["name"]}',
+        "branch": branch, "head": head, "dirty": bool(dirty) if dirty is not None else None,
+        "checkpoint_commit": claimed, "checkpoint_commit_exists": exists,
+        "checkpoint": checkpoint, "issues": issues, "policies": project["policies"],
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", default=".")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+    try:
+        report = inspect(args.root)
+    except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        print(json.dumps({"error": str(exc)}) if args.json else f"INVALID: {exc}")
+        return 2
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f'VALID CONTRACT: {report["repository"]}')
+        print(f'Git: {report["branch"] or "unknown"} @ {report["head"] or "unknown"}')
+        for issue in report["issues"]:
+            print(f"WARNING: {issue}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

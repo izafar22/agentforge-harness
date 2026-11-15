@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AgentForge project",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "project",
+    "repository",
+    "policies"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "project": {
+      "type": "object",
+      "required": [
+        "id",
+        "name"
+      ]
+    },
+    "repository": {
+      "type": "object",
+      "required": [
+        "provider",
+        "owner",
+        "name",
+        "default_branch"
+      ]
+    },
+    "policies": {
+      "type": "object",
+      "required": [
+        "require_pr",
+        "require_approval_for_merge",
+        "require_approval_for_deploy"
+      ]
+    }
+  }
+}
