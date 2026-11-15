@@ -1,0 +1,13 @@
+schema_version: 1
+project:
+  id: agentforge-harness
+  name: AgentForge Harness
+repository:
+  provider: github
+  owner: izafar22
+  name: agentforge-harness
+  default_branch: main
+policies:
+  require_pr: true
+  require_approval_for_merge: true
+  require_approval_for_deploy: true

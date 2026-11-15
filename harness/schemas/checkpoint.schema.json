@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AgentForge checkpoint",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "task",
+    "git",
+    "progress",
+    "blockers",
+    "next_action",
+    "verification"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "task": {
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "status"
+      ]
+    },
+    "git": {
+      "type": "object",
+      "required": [
+        "base_branch",
+        "work_branch",
+        "last_verified_commit"
+      ]
+    },
+    "progress": {
+      "type": "object",
+      "required": [
+        "completed",
+        "remaining"
+      ]
+    },
+    "blockers": {
+      "type": "array"
+    },
+    "next_action": {
+      "type": "object",
+      "required": [
+        "type",
+        "description"
+      ]
+    },
+    "verification": {
+      "type": "object",
+      "required": [
+        "status",
+        "verified_at"
+      ]
+    }
+  }
+}

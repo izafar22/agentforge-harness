@@ -1,0 +1,22 @@
+schema_version: 1
+task:
+  id: HARNESS-001
+  title: Establish repository-based agent recovery harness
+  status: in_progress
+git:
+  base_branch: main
+  work_branch: feature/phase1-memory-recovery
+  last_verified_commit: null
+progress:
+  completed:
+    - Define first memory contract and recovery tools
+  remaining:
+    - Verify GitHub Actions CI
+    - Execute cold-start with a new Codex session
+blockers: []
+next_action:
+  type: verification
+  description: Validate the new harness PR and test cold-start recovery
+verification:
+  status: unverified
+  verified_at: null
