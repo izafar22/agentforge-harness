@@ -2,6 +2,7 @@
 """Read-only validation and local Git inspection of AgentForge memory."""
 import argparse
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -95,7 +96,8 @@ def validate(project, checkpoint):
 
 
 def git(root, *arguments):
-    result = subprocess.run(["git", "-C", str(root), *arguments], capture_output=True, text=True, check=False, timeout=10)
+    result = subprocess.run(["git", "-C", str(root), *arguments], capture_output=True, text=True, check=False, timeout=10,
+                            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
     return result.stdout.strip() if result.returncode == 0 else None
 
 
@@ -114,18 +116,36 @@ def inspect(root):
         issues.append("Cannot inspect working tree")
     elif dirty:
         issues.append("Working tree has uncommitted changes")
+    expected_branch = checkpoint["git"]["work_branch"]
+    branch_status = "UNKNOWN"
+    if branch is None:
+        issues.append("UNKNOWN: current branch unavailable")
+    elif branch != expected_branch:
+        branch_status = "CONFLICT"
+        issues.append(f"CONFLICT: checkpoint work branch '{expected_branch}' differs from checkout '{branch}'")
+    else:
+        branch_status = "VERIFIED"
     claimed = checkpoint["git"]["last_verified_commit"]
+    baseline_status = "UNKNOWN"
+    if not claimed:
+        issues.append("UNKNOWN: checkpoint has no last_verified_commit baseline")
     exists = None
     if claimed:
         exists = git(root, "cat-file", "-t", claimed) == "commit"
         if not exists:
-            issues.append("Checkpoint references a commit not found locally")
+            baseline_status = "CONFLICT"
+            issues.append("CONFLICT: checkpoint references a commit not found locally")
         elif head != claimed:
-            issues.append("Checkpoint commit differs from HEAD")
+            baseline_status = "CONFLICT"
+            issues.append("CONFLICT: checkpoint commit differs from HEAD")
+        else:
+            baseline_status = "VERIFIED"
     return {
         "project": project["project"]["id"],
         "repository": f'{project["repository"]["owner"]}/{project["repository"]["name"]}',
         "branch": branch, "head": head, "dirty": bool(dirty) if dirty is not None else None,
+        "checkpoint_branch": expected_branch, "checkpoint_branch_status": branch_status,
+        "checkpoint_baseline_status": baseline_status,
         "checkpoint_commit": claimed, "checkpoint_commit_exists": exists,
         "checkpoint": checkpoint, "issues": issues, "policies": project["policies"],
     }

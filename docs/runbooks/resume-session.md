@@ -11,4 +11,4 @@
 
 ## Limitations
 
-GitHub PR discovery is first-page bounded. CI run verification checks workflow conclusions at the commit SHA, but does not establish required check policy, approval status or branch protection. Do not interpret a successful workflow as merge authorization.
+GitHub PR and workflow discovery paginate to completeness, within a 20-page safety bound; partial results, missing workflow total counts, malformed entries, and API failures are UNKNOWN. Workflow evidence is **SHA-scoped**, not specifically tied to the PR's required checks, and does not establish required check policy, approval status or branch protection. Do not interpret successful workflow runs as merge authorization. Redirects are disabled for GitHub API requests carrying tokens. The checkpoint's work branch must match the checkout; a missing baseline SHA is UNKNOWN. For minimally mutating inspection use `python -B` and `GIT_OPTIONAL_LOCKS=0`.

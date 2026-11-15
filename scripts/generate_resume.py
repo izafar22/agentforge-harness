@@ -4,6 +4,8 @@ import argparse
 import importlib.util
 import json
 import os
+import sys
+sys.dont_write_bytecode = True
 from pathlib import Path
 from urllib import request, error
 
@@ -41,15 +43,32 @@ def build(root, github=False, fetcher=github_get):
                                            lambda repo, path, token: fetcher(repo, path, token)))
         remote = gh["head"]
         issues.extend(gh["issues"])
-    readiness = "REQUIRES INVESTIGATION" if issues else "LOCAL STATE VERIFIED; PR/CI UNKNOWN"
+    if any(issue.startswith("CONFLICT:") for issue in issues):
+        readiness = "CONFLICT — INVESTIGATE BEFORE CONTINUING"
+    elif any(issue.startswith("UNKNOWN:") for issue in issues):
+        readiness = "PARTIAL — CHECKPOINT OR LOCAL EVIDENCE UNKNOWN"
+    elif not github:
+        readiness = "LOCAL CHECKS COMPLETE — GITHUB NOT REQUESTED"
+    elif gh["ci"] == "PENDING":
+        readiness = "PENDING — WAIT FOR WORKFLOW COMPLETION"
+    elif gh["ci"] == "FAILED OR INCOMPLETE":
+        readiness = "FAILED — INVESTIGATE WORKFLOW RESULTS"
+    elif gh["head"] != "VERIFIED" or gh["pull_requests"] != "VERIFIED" or gh["ci"] != "VERIFIED":
+        readiness = "PARTIAL — REMOTE EVIDENCE UNKNOWN OR AMBIGUOUS"
+    else:
+        readiness = "GIT/GITHUB FACTS VERIFIED — HUMAN REVIEW STILL REQUIRED"
     lines = [
         f'# Resume: {state["project"]}', "",
         f'**Task:** {checkpoint["task"]["id"]} — {checkpoint["task"]["title"]}',
         f'**Checkpoint status (claim):** {checkpoint["task"]["status"]}',
         f'**Local Git:** {state["branch"] or "unknown"} @ {state["head"] or "unknown"}',
+        f'**Checkpoint branch:** {state["checkpoint_branch"]} ({state["checkpoint_branch_status"]})',
+        f'**Checkpoint baseline:** {state["checkpoint_commit"] or "not recorded"} ({state["checkpoint_baseline_status"]})',
         f"**Remote verification:** {remote}",
         f"**Readiness:** {readiness}", "", "## GitHub evidence",
-        ("PR: " + str(gh["pr"]) + " | PR status: " + gh["pull_requests"] + " | CI: " + gh["ci"] + " (" + str(gh["ci_conclusion"]) + ")" if gh else "Not requested"),
+        ("PR discovery: " + gh["pull_requests"] + " | PR: " + str(gh["pr"]) +
+         " | SHA-level CI: " + gh["ci"] + " (" + str(gh["ci_conclusion"]) + ")" if gh else "Not requested; PR and CI remain UNKNOWN"),
+        "Workflow success is not proof of required checks, review approval, or merge authorization.",
         "", "## Reported completed work",
     ]
     lines.extend("- " + item for item in checkpoint["progress"]["completed"])
@@ -58,9 +77,9 @@ def build(root, github=False, fetcher=github_get):
     lines.extend(["", "## Issues / unknowns"])
     lines.extend("- " + issue for issue in issues)
     if not issues:
-        lines.append("- No local inconsistencies; PR/CI and progress claims remain unverified.")
-    lines.extend(["", "## Next reported action", checkpoint["next_action"]["description"],
-                  "", "## Guardrails", "- Verify PR/CI facts independently.",
+        lines.append("- No detected evidence conflicts; checkpoint progress remains unverified.")
+    lines.extend(["", "## Next reported action (not automatically authorized)", checkpoint["next_action"]["description"],
+                  "", "## Guardrails", "- Verify required checks and branch protections independently.",
                   "- Require explicit human approval before merge or deployment.",
                   "- Treat checkpoint progress as claims, not independent proof."])
     return "\n".join(lines) + "\n"

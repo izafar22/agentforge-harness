@@ -6,11 +6,13 @@ A reusable **harness-engineering** foundation for supervised AI software develop
 
 ```bash
 python scripts/verify_context.py --root . --json
-python scripts/generate_resume.py --root .
+python -B scripts/generate_resume.py --root . --github
 python -m unittest discover -s tests -v
 ```
 
-No third-party Python dependencies are required for offline inspection. The optional `--github` flag on the resume script checks the current commit against the GitHub API. PR and CI verification are **not yet implemented** and always remain unknown.
+No third-party Python dependencies are required for offline inspection. The optional `--github` flag verifies the commit SHA, discovers matching branch PRs, and checks all available SHA-level GitHub Actions workflow runs with complete pagination. Missing, malformed, truncated, ambiguous, or unavailable evidence is reported as UNKNOWN. CI success does **not** prove required-check policy, PR approval, or permission to merge.
+
+Run `python -B scripts/generate_resume.py --root . --github` to avoid Python bytecode cache writes. Git inspection uses `GIT_OPTIONAL_LOCKS=0`; do not assume the entire toolchain is a security sandbox.
 
 ## Adopt in another repository
 
