@@ -16,7 +16,7 @@ def fake(repo, path, token):
         return [{"number": 1, "state": "open", "draft": False, "merged_at": None,
                  "head": {"sha": SHA}}], None
     if path.startswith("actions/runs?"):
-        return {"total_count": 1, "workflow_runs": [{"head_sha": SHA, "status": "completed", "conclusion": "success"}]}, None
+        return {"total_count": 1, "workflow_runs": [{"id": 1, "head_sha": SHA, "status": "completed", "conclusion": "success"}]}, None
     raise AssertionError(path)
 
 
@@ -60,11 +60,11 @@ class GitHubReconciliationTests(unittest.TestCase):
 
 
     def test_truncated_workflow_page_unknown(self):
-        run = {"head_sha": SHA, "status": "completed", "conclusion": "success"}
+        run = {"id": 1, "head_sha": SHA, "status": "completed", "conclusion": "success"}
         def truncated(repo, path, token):
             if path.startswith("actions/runs?"):
                 if "&page=1" in path:
-                    return {"total_count": 101, "workflow_runs": [run] * 100}, None
+                    return {"total_count": 101, "workflow_runs": [dict(run, id=i) for i in range(1, 101)]}, None
                 return None, "offline"
             return fake(repo, path, token)
         result = gh.reconcile("example/repo", "feature/test", SHA, fetch=truncated)
@@ -75,8 +75,8 @@ class GitHubReconciliationTests(unittest.TestCase):
         run = {"head_sha": SHA, "status": "completed", "conclusion": "success"}
         def second(repo, path, token):
             if path.startswith("actions/runs?"):
-                return ({"total_count": 101, "workflow_runs": [run] * 100} if "&page=1" in path
-                        else {"total_count": 101, "workflow_runs": [dict(run, conclusion="failure")]}), None
+                return ({"total_count": 101, "workflow_runs": [dict(run, id=i) for i in range(1, 101)]} if "&page=1" in path
+                        else {"total_count": 101, "workflow_runs": [dict(run, id=101, conclusion="failure")]}), None
             return fake(repo, path, token)
         result = gh.reconcile("example/repo", "feature/test", SHA, fetch=second)
         self.assertEqual(result["ci"], "FAILED OR INCOMPLETE")
@@ -120,7 +120,7 @@ class GitHubReconciliationTests(unittest.TestCase):
         def queued(repo, path, token):
             if path.startswith("actions/runs?"):
                 return {"total_count": 1, "workflow_runs": [
-                    {"head_sha": SHA, "status": "queued", "conclusion": None}]}, None
+                    {"id": 1, "head_sha": SHA, "status": "queued", "conclusion": None}]}, None
             return fake(repo, path, token)
         result = gh.reconcile("example/repo", "feature/test", SHA, fetch=queued)
         self.assertEqual(result["ci"], "PENDING")
@@ -138,7 +138,7 @@ class GitHubReconciliationTests(unittest.TestCase):
         def malformed(repo, path, token):
             if path.startswith("actions/runs?"):
                 return {"workflow_runs": [
-                    {"head_sha": SHA, "status": "completed", "conclusion": "success"}]}, None
+                    {"id": 1, "head_sha": SHA, "status": "completed", "conclusion": "success"}]}, None
             return fake(repo, path, token)
         result = gh.reconcile("example/repo", "feature/test", SHA, fetch=malformed)
         self.assertEqual(result["ci"], "UNKNOWN")
@@ -146,6 +146,54 @@ class GitHubReconciliationTests(unittest.TestCase):
     def test_authenticated_redirect_not_followed(self):
         self.assertIsNone(gh.NoRedirect().redirect_request(
             None, None, 302, "redirect", {}, "https://other.example"))
+
+
+    def test_duplicate_workflow_ids_across_pages_unknown(self):
+        def duplicate(repo, path, token):
+            if path.startswith("actions/runs?"):
+                if "&page=1" in path:
+                    return {"total_count": 101, "workflow_runs": [
+                        {"id": i, "head_sha": SHA, "status": "completed",
+                         "conclusion": "success"} for i in range(1, 101)]}, None
+                return {"total_count": 101, "workflow_runs": [
+                    {"id": 100, "head_sha": SHA, "status": "completed",
+                     "conclusion": "success"}]}, None
+            return fake(repo, path, token)
+        result = gh.reconcile("example/repo", "feature/test", SHA, fetch=duplicate)
+        self.assertEqual(result["ci"], "UNKNOWN")
+        self.assertTrue(any("Duplicate workflow run ID" in i for i in result["issues"]))
+
+    def test_invalid_workflow_status_unknown(self):
+        def invalid(repo, path, token):
+            if path.startswith("actions/runs?"):
+                return {"total_count": 1, "workflow_runs": [
+                    {"id": 12, "head_sha": SHA, "status": "rubbish",
+                     "conclusion": None}]}, None
+            return fake(repo, path, token)
+        self.assertEqual(gh.reconcile("example/repo", "feature/test", SHA, fetch=invalid)["ci"], "UNKNOWN")
+
+    def test_empty_completed_conclusion_unknown(self):
+        def invalid(repo, path, token):
+            if path.startswith("actions/runs?"):
+                return {"total_count": 1, "workflow_runs": [
+                    {"id": 12, "head_sha": SHA, "status": "completed",
+                     "conclusion": ""}]}, None
+            return fake(repo, path, token)
+        self.assertEqual(gh.reconcile("example/repo", "feature/test", SHA, fetch=invalid)["ci"], "UNKNOWN")
+
+    def test_invalid_pr_number_and_merged_date_unknown(self):
+        for invalid_field in ({"number": 0}, {"merged_at": ["bad"]}):
+            def invalid(repo, path, token):
+                if path.startswith("pulls?"):
+                    p = {"head": {"sha": SHA}, "number": 1, "state": "open",
+                         "draft": False, "merged_at": None}
+                    p.update(invalid_field)
+                    return [p], None
+                return fake(repo, path, token)
+            with self.subTest(invalid_field=invalid_field):
+                self.assertEqual(
+                    gh.reconcile("example/repo", "feature/test", SHA, fetch=invalid)["pull_requests"],
+                    "UNKNOWN")
 
 if __name__ == "__main__":
     unittest.main()

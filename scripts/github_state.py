@@ -62,6 +62,14 @@ def _pages(repo, endpoint, token, fetch, collection):
             return None, f"Malformed {collection} entries on page {page}"
         if len(batch) > PAGE_SIZE:
             return None, f"Oversized {collection} page {page}"
+        if collection == "runs":
+            # Only unique, positive workflow run IDs establish complete evidence.
+            ids = [r.get("id") for r in batch]
+            if any(type(i) is not int or i <= 0 for i in ids):
+                return None, f"Malformed or missing workflow run ID on page {page}"
+            previous = {r["id"] for r in items}
+            if len(set(ids)) != len(ids) or any(i in previous for i in ids):
+                return None, f"Duplicate workflow run ID on page {page}; completeness unverified"
         items.extend(batch)
         if collection == "pulls":
             if len(batch) < PAGE_SIZE:
@@ -100,7 +108,11 @@ def reconcile(repo, branch, head, token=None, fetch=api_get):
         matches = [p for p in prs if p["head"]["sha"] == head]
         if len(matches) == 1:
             p = matches[0]
-            if type(p.get("number")) is not int or p.get("state") not in ("open", "closed") or type(p.get("draft")) is not bool:
+            if type(p.get("number")) is not int or p["number"] <= 0
+               or p.get("state") not in ("open", "closed")
+               or type(p.get("draft")) is not bool
+               or (p.get("merged_at") is not None and
+                   (not isinstance(p["merged_at"], str) or not p["merged_at"].strip())):
                 evidence["issues"].append("PR verification UNKNOWN: invalid matching PR fields")
             else:
                 evidence["pull_requests"] = "VERIFIED"
@@ -115,9 +127,17 @@ def reconcile(repo, branch, head, token=None, fetch=api_get):
     runs, err = _pages(repo, "actions/runs?" + parse.urlencode({"head_sha": head}), token, fetch, "runs")
     if err:
         evidence["issues"].append("CI verification UNKNOWN: " + err)
-    elif any(r.get("head_sha") != head or not isinstance(r.get("status"), str)
-             or (r["status"] == "completed" and not isinstance(r.get("conclusion"), str))
-             for r in runs):
+    elif any(
+        r.get("head_sha") != head
+        or r.get("status") not in ("queued", "in_progress", "completed", "waiting",
+                                  "requested", "pending")
+        or (r["status"] == "completed" and
+            (not isinstance(r.get("conclusion"), str)
+             or r["conclusion"] not in ("success", "failure", "cancelled",
+                                       "skipped", "timed_out", "action_required",
+                                       "neutral", "stale")))
+        or (r["status"] != "completed" and r.get("conclusion") is not None)
+        for r in runs):
         evidence["issues"].append("CI verification UNKNOWN: malformed workflow entry or incorrect SHA")
     elif not runs:
         evidence["issues"].append("No workflow runs found; not evidence of success")

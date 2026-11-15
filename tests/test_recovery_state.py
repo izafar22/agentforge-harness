@@ -37,6 +37,34 @@ class RecoveryStateTests(unittest.TestCase):
         self.assertEqual(result["checkpoint_branch_status"], "CONFLICT")
         self.assertTrue(any("checkpoint work branch" in issue for issue in result["issues"]))
 
+    def test_dirty_worktree_prevents_verified_readiness(self):
+        def dirty(root, *args):
+            if args[0] == "status":
+                return " M src/file.py"
+            if args[0] == "cat-file":
+                return "commit"
+            return {"symbolic-ref": "feature/phase1-memory-recovery",
+                    "rev-parse": SHA}.get(args[0])
+        with patch.object(resume.module, "git", side_effect=dirty):
+            with patch.object(resume.module, "inspect", wraps=resume.module.inspect):
+                with patch.object(resume.module, "parse_simple_yaml", wraps=resume.module.parse_simple_yaml):
+                    output = resume.build(ROOT)
+        self.assertIn("PARTIAL", output)
+        self.assertNotIn("GIT/GITHUB FACTS VERIFIED", output)
+
+    def test_unreadable_worktree_prevents_verified_readiness(self):
+        def unreadable(root, *args):
+            if args[0] == "status":
+                return None
+            if args[0] == "cat-file":
+                return "commit"
+            return {"symbolic-ref": "feature/phase1-memory-recovery",
+                    "rev-parse": SHA}.get(args[0])
+        with patch.object(resume.module, "git", side_effect=unreadable):
+            output = resume.build(ROOT)
+        self.assertIn("PARTIAL", output)
+        self.assertIn("Cannot inspect working tree", output)
+
     def test_null_baseline_is_unknown(self):
         with patch.object(verify, "git", side_effect=fake_git):
             result = verify.inspect(ROOT)
@@ -52,7 +80,7 @@ class RecoveryStateTests(unittest.TestCase):
                          "head": {"sha": SHA}}], None
             if path.startswith("actions/runs?"):
                 return {"total_count": 1, "workflow_runs": [
-                    {"head_sha": SHA, "status": "completed", "conclusion": "success"}]}, None
+                    {"id": 1, "head_sha": SHA, "status": "completed", "conclusion": "success"}]}, None
             raise AssertionError(path)
         with patch.object(resume.module, "git", side_effect=fake_git):
             output = resume.build(ROOT, github=True, fetcher=fake)

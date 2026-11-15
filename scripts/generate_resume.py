@@ -45,8 +45,10 @@ def build(root, github=False, fetcher=github_get):
         issues.extend(gh["issues"])
     if any(issue.startswith("CONFLICT:") for issue in issues):
         readiness = "CONFLICT — INVESTIGATE BEFORE CONTINUING"
-    elif any(issue.startswith("UNKNOWN:") for issue in issues):
-        readiness = "PARTIAL — CHECKPOINT OR LOCAL EVIDENCE UNKNOWN"
+    elif issues:
+        # Every local or remote inspection issue is disqualifying for fully
+        # verified readiness (including dirty and unreadable worktrees).
+        readiness = "PARTIAL — INVESTIGATE LOCAL OR REMOTE EVIDENCE"
     elif not github:
         readiness = "LOCAL CHECKS COMPLETE — GITHUB NOT REQUESTED"
     elif gh["ci"] == "PENDING":
