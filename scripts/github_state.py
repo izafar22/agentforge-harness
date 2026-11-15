@@ -4,6 +4,8 @@ Successful SHA-level workflows never imply required checks or merge approval.
 """
 import json
 import re
+from datetime import datetime
+from http.client import HTTPException
 from urllib import error, parse, request
 
 PAGE_SIZE = 100
@@ -31,7 +33,7 @@ def api_get(repo, path, token=None):
             if response.geturl() != url:
                 return None, "GitHub API origin changed"
             return json.load(response), None
-    except (error.URLError, TimeoutError, ValueError) as exc:
+    except (error.URLError, TimeoutError, ValueError, OSError, HTTPException) as exc:
         return None, "GitHub API request failed: " + type(exc).__name__
 
 
@@ -42,7 +44,10 @@ def _pages(repo, endpoint, token, fetch, collection):
     for page in range(1, MAX_PAGES + 1):
         sep = "&" if "?" in endpoint else "?"
         path = endpoint + sep + parse.urlencode({"per_page": PAGE_SIZE, "page": page})
-        payload, err = fetch(repo, path, token)
+        try:
+            payload, err = fetch(repo, path, token)
+        except (error.URLError, TimeoutError, ValueError, OSError, HTTPException) as exc:
+            return None, f"GitHub {collection} page {page} interrupted: {type(exc).__name__}"
         if err:
             return None, f"GitHub {collection} page {page} unavailable: {err}"
         if collection == "pulls":
@@ -81,6 +86,32 @@ def _pages(repo, endpoint, token, fetch, collection):
                 return None, f"Incomplete {collection} pagination: {len(items)} of {expected_total}"
     return None, f"{collection} results exceeded {MAX_PAGES} pages; completeness unverified"
 
+def valid_github_timestamp(value):
+    """GitHub merged_at must be null or a valid UTC RFC3339 timestamp."""
+    if value is None:
+        return True
+    if not isinstance(value, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value
+    ):
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False
+    return True
+
+
+def valid_pr_head(pr, repo, branch):
+    """An exact SHA alone is insufficient to establish branch provenance."""
+    source = pr.get("head")
+    if not isinstance(source, dict):
+        return False
+    source_repo = source.get("repo")
+    return (source.get("ref") == branch
+            and isinstance(source_repo, dict)
+            and source_repo.get("full_name") == repo
+            and isinstance(source.get("sha"), str))
+
 
 def reconcile(repo, branch, head, token=None, fetch=api_get):
     """Reconcile commit, PRs, and SHA-scoped CI, failing closed on incomplete data."""
@@ -91,7 +122,10 @@ def reconcile(repo, branch, head, token=None, fetch=api_get):
     if not head or not branch:
         evidence["issues"].append("Cannot reconcile GitHub without local HEAD and branch")
         return evidence
-    commit, err = fetch(repo, "commits/" + parse.quote(head, safe=""), token)
+    try:
+        commit, err = fetch(repo, "commits/" + parse.quote(head, safe=""), token)
+    except (error.URLError, TimeoutError, ValueError, OSError, HTTPException) as exc:
+        commit, err = None, type(exc).__name__
     if err or not isinstance(commit, dict) or commit.get("sha") != head:
         evidence["issues"].append("Remote commit verification unavailable or mismatched")
         return evidence
@@ -108,11 +142,11 @@ def reconcile(repo, branch, head, token=None, fetch=api_get):
         matches = [p for p in prs if p["head"]["sha"] == head]
         if len(matches) == 1:
             p = matches[0]
-            if (type(p.get("number")) is not int or p["number"] <= 0
+            if (not valid_pr_head(p, repo, branch)
+                or type(p.get("number")) is not int or p["number"] <= 0
                 or p.get("state") not in ("open", "closed")
                 or type(p.get("draft")) is not bool
-                or (p.get("merged_at") is not None and
-                    (not isinstance(p["merged_at"], str) or not p["merged_at"].strip()))):
+                or not valid_github_timestamp(p.get("merged_at"))):
                 evidence["issues"].append("PR verification UNKNOWN: invalid matching PR fields")
             else:
                 evidence["pull_requests"] = "VERIFIED"

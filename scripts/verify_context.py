@@ -83,6 +83,13 @@ def validate(project, checkpoint):
     if checkpoint["task"]["status"] not in ("not_started", "in_progress", "blocked", "completed"):
         raise ValueError("invalid task status")
     required(checkpoint["git"], ("base_branch", "work_branch", "last_verified_commit"), "git")
+    for field in ("base_branch", "work_branch"):
+        if not isinstance(checkpoint["git"][field], str) or not checkpoint["git"][field].strip():
+            raise ValueError(f"git.{field} must be a nonempty string")
+    baseline = checkpoint["git"]["last_verified_commit"]
+    if baseline is not None and (not isinstance(baseline, str)
+                                 or not re.fullmatch(r"[0-9a-fA-F]{7,40}", baseline)):
+        raise ValueError("git.last_verified_commit must be null or a hex commit SHA")
     required(checkpoint["progress"], ("completed", "remaining"), "progress")
     for key in ("completed", "remaining"):
         if not isinstance(checkpoint["progress"][key], list) or not all(isinstance(x, str) for x in checkpoint["progress"][key]):
@@ -96,8 +103,12 @@ def validate(project, checkpoint):
 
 
 def git(root, *arguments):
-    result = subprocess.run(["git", "-C", str(root), *arguments], capture_output=True, text=True, check=False, timeout=10,
-                            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+    try:
+        result = subprocess.run(["git", "-C", str(root), *arguments], capture_output=True,
+                                text=True, check=False, timeout=10,
+                                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+    except (subprocess.TimeoutExpired, OSError):
+        return None
     return result.stdout.strip() if result.returncode == 0 else None
 
 

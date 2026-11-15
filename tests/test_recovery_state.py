@@ -77,7 +77,7 @@ class RecoveryStateTests(unittest.TestCase):
                 return {"sha": SHA}, None
             if path.startswith("pulls?"):
                 return [{"number": 2, "draft": True, "state": "open",
-                         "head": {"sha": SHA}}], None
+                         "head": {"sha": SHA, "ref": "feature/test", "repo": {"full_name": "example/repo"}}}], None
             if path.startswith("actions/runs?"):
                 return {"total_count": 1, "workflow_runs": [
                     {"id": 1, "head_sha": SHA, "status": "completed", "conclusion": "success"}]}, None
@@ -88,6 +88,39 @@ class RecoveryStateTests(unittest.TestCase):
         self.assertIn("CI: VERIFIED", output)
         self.assertNotIn("PR/CI UNKNOWN", output)
 
+
+
+    def test_boolean_checkpoint_commit_is_invalid(self):
+        import copy
+        project = verify.parse_simple_yaml((ROOT / "harness/project.yaml").read_text())
+        checkpoint = verify.parse_simple_yaml((ROOT / "harness/checkpoint.yaml").read_text())
+        checkpoint["git"]["last_verified_commit"] = True
+        with self.assertRaisesRegex(ValueError, "git.last_verified_commit"):
+            verify.validate(project, checkpoint)
+
+    def test_git_status_timeout_is_reported_unknown(self):
+        import subprocess
+        from unittest.mock import patch
+        original = verify.subprocess.run
+
+        def timed(*args, **kwargs):
+            if "status" in args[0]:
+                raise subprocess.TimeoutExpired(args[0], kwargs.get("timeout", 10))
+            return original(*args, **kwargs)
+
+        with patch.object(verify.subprocess, "run", side_effect=timed):
+            result = verify.inspect(ROOT)
+        self.assertIsNone(result["dirty"])
+        self.assertIn("Cannot inspect working tree", result["issues"])
+
+    def test_resume_cli_handles_invalid_checkpoint_without_traceback(self):
+        from unittest.mock import patch
+        with patch.object(resume.module, "inspect",
+                          side_effect=ValueError("git.last_verified_commit invalid")):
+            with patch("sys.argv", ["generate_resume.py", "--root", str(ROOT)]):
+                with self.assertRaises(SystemExit) as outcome:
+                    resume.main()
+        self.assertEqual(outcome.exception.code, 2)
 
 if __name__ == "__main__":
     unittest.main()

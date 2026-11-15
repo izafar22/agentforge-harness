@@ -14,7 +14,7 @@ def fake(repo, path, token):
         return {"sha": SHA}, None
     if path.startswith("pulls?"):
         return [{"number": 1, "state": "open", "draft": False, "merged_at": None,
-                 "head": {"sha": SHA}}], None
+                 "head": {"sha": SHA, "ref": "feature/test", "repo": {"full_name": "example/repo"}}}], None
     if path.startswith("actions/runs?"):
         return {"total_count": 1, "workflow_runs": [{"id": 1, "head_sha": SHA, "status": "completed", "conclusion": "success"}]}, None
     raise AssertionError(path)
@@ -82,7 +82,7 @@ class GitHubReconciliationTests(unittest.TestCase):
         self.assertEqual(result["ci"], "FAILED OR INCOMPLETE")
 
     def test_second_pr_page_ambiguity(self):
-        p = {"head": {"sha": SHA}, "number": 1, "draft": False, "state": "open"}
+        p = {"head": {"sha": SHA, "ref": "feature/test", "repo": {"full_name": "example/repo"}}, "number": 1, "draft": False, "state": "open"}
         other = {"head": {"sha": "b" * 40}}
         def second(repo, path, token):
             if path.startswith("pulls?"):
@@ -92,7 +92,7 @@ class GitHubReconciliationTests(unittest.TestCase):
         self.assertEqual(result["pull_requests"], "AMBIGUOUS")
 
     def test_incomplete_pr_page_unknown(self):
-        p = {"head": {"sha": SHA}, "number": 1, "draft": False, "state": "open"}
+        p = {"head": {"sha": SHA, "ref": "feature/test", "repo": {"full_name": "example/repo"}}, "number": 1, "draft": False, "state": "open"}
         def truncated(repo, path, token):
             if path.startswith("pulls?"):
                 return ([p] * 100, None) if "&page=1" in path else (None, "offline")
@@ -185,7 +185,7 @@ class GitHubReconciliationTests(unittest.TestCase):
         for invalid_field in ({"number": 0}, {"merged_at": ["bad"]}):
             def invalid(repo, path, token):
                 if path.startswith("pulls?"):
-                    p = {"head": {"sha": SHA}, "number": 1, "state": "open",
+                    p = {"head": {"sha": SHA, "ref": "feature/test", "repo": {"full_name": "example/repo"}}, "number": 1, "state": "open",
                          "draft": False, "merged_at": None}
                     p.update(invalid_field)
                     return [p], None
@@ -194,6 +194,90 @@ class GitHubReconciliationTests(unittest.TestCase):
                 self.assertEqual(
                     gh.reconcile("example/repo", "feature/test", SHA, fetch=invalid)["pull_requests"],
                     "UNKNOWN")
+
+
+    def test_invalid_timestamp_string_unknown(self):
+        for bad in ("not-a-timestamp", "2026-02-30T12:00:00Z", "2026-11-15T25:00:00Z"):
+            def malformed(repo, path, token):
+                if path.startswith("pulls?"):
+                    return [{"head": {"sha": SHA, "ref": "feature/test",
+                                      "repo": {"full_name": "example/repo"}},
+                             "number": 2, "state": "closed",
+                             "draft": False, "merged_at": bad}], None
+                return fake(repo, path, token)
+            with self.subTest(timestamp=bad):
+                self.assertEqual(
+                    gh.reconcile("example/repo", "feature/test", SHA, fetch=malformed)["pull_requests"],
+                    "UNKNOWN")
+
+    def test_valid_merged_timestamp_accepted(self):
+        def merged(repo, path, token):
+            if path.startswith("pulls?"):
+                return [{"head": {"sha": SHA, "ref": "feature/test",
+                                  "repo": {"full_name": "example/repo"}},
+                         "number": 2, "state": "closed",
+                         "draft": False, "merged_at": "2026-11-15T17:44:40Z"}], None
+            return fake(repo, path, token)
+        self.assertEqual(
+            gh.reconcile("example/repo", "feature/test", SHA, fetch=merged)["pull_requests"], "VERIFIED")
+
+    def test_same_sha_wrong_branch_unknown(self):
+        def wrong_branch(repo, path, token):
+            if path.startswith("pulls?"):
+                return [{"head": {"sha": SHA, "ref": "feature/another",
+                                  "repo": {"full_name": "example/repo"}},
+                         "number": 2, "state": "open", "draft": True, "merged_at": None}], None
+            return fake(repo, path, token)
+        self.assertEqual(
+            gh.reconcile("example/repo", "feature/test", SHA, fetch=wrong_branch)["pull_requests"], "UNKNOWN")
+
+    def test_same_sha_wrong_source_repo_unknown(self):
+        def wrong_repo(repo, path, token):
+            if path.startswith("pulls?"):
+                return [{"head": {"sha": SHA, "ref": "feature/test",
+                                  "repo": {"full_name": "other/repo"}},
+                         "number": 2, "state": "open", "draft": True, "merged_at": None}], None
+            return fake(repo, path, token)
+        self.assertEqual(
+            gh.reconcile("example/repo", "feature/test", SHA, fetch=wrong_repo)["pull_requests"], "UNKNOWN")
+
+    def test_incomplete_read_is_unknown(self):
+        from http.client import IncompleteRead
+        from unittest.mock import patch
+
+        class BrokenResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def geturl(self):
+                return "https://api.github.com/repos/example/repo/commits/" + SHA
+
+            def read(self, *args):
+                raise IncompleteRead(b"partial", 100)
+
+        class BrokenOpener:
+            def open(self, *args, **kwargs):
+                return BrokenResponse()
+
+        with patch.object(gh.request, "build_opener", return_value=BrokenOpener()):
+            data, err = gh.api_get("example/repo", "commits/" + SHA, token="PLACEHOLDER")
+        self.assertIsNone(data)
+        self.assertIn("IncompleteRead", err)
+
+    def test_fetch_exception_preserves_commit_evidence(self):
+        from http.client import IncompleteRead
+
+        def interrupted(repo, path, token):
+            if path.startswith("pulls?"):
+                raise IncompleteRead(b"partial", 100)
+            return fake(repo, path, token)
+        evidence = gh.reconcile("example/repo", "feature/test", SHA, fetch=interrupted)
+        self.assertEqual(evidence["head"], "VERIFIED")
+        self.assertEqual(evidence["pull_requests"], "UNKNOWN")
+        self.assertEqual(evidence["ci"], "VERIFIED")
 
 if __name__ == "__main__":
     unittest.main()
