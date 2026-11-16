@@ -39,7 +39,7 @@ class ColdStartTests(unittest.TestCase):
             result = resume.build(root)
             self.assertIn("HARNESS-001", result)
             self.assertIn("cold-start", result)
-            self.assertIn("REQUIRES INVESTIGATION", result)
+            self.assertIn("PARTIAL — INVESTIGATE LOCAL OR REMOTE EVIDENCE", result)
         finally:
             temp.cleanup()
 
@@ -49,8 +49,8 @@ class ColdStartTests(unittest.TestCase):
         temp, root = self.setup_repo(checkpoint)
         try:
             state = verify.inspect(root)
-            self.assertFalse(state["checkpoint_commit_exists"])
-            self.assertTrue(any("not found locally" in message for message in state["issues"]))
+            self.assertIsNone(state["checkpoint_commit_exists"])
+            self.assertTrue(any("cannot inspect checkpoint commit" in message for message in state["issues"]))
         finally:
             temp.cleanup()
 

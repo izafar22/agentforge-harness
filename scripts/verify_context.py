@@ -2,6 +2,7 @@
 """Read-only validation and local Git inspection of AgentForge memory."""
 import argparse
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -66,6 +67,20 @@ def required(mapping, keys, label):
 
 
 def validate(project, checkpoint):
+    """Reject deeply nested or oversized input before JSON report serialization."""
+    for label, value in (("project", project), ("checkpoint", checkpoint)):
+        stack = [(value, 0)]
+        count = 0
+        while stack:
+            node, depth = stack.pop()
+            count += 1
+            if depth > 32 or count > 10000:
+                raise ValueError(f"{label} exceeds supported nesting or size limits")
+            if isinstance(node, dict):
+                stack.extend((child, depth + 1) for child in node.values())
+            elif isinstance(node, list):
+                stack.extend((child, depth + 1) for child in node)
+
     required(project, ("schema_version", "project", "repository", "policies"), "project")
     required(checkpoint, ("schema_version", "task", "git", "progress", "blockers", "next_action", "verification"), "checkpoint")
     for name, obj in (("project", project), ("checkpoint", checkpoint)):
@@ -82,6 +97,13 @@ def validate(project, checkpoint):
     if checkpoint["task"]["status"] not in ("not_started", "in_progress", "blocked", "completed"):
         raise ValueError("invalid task status")
     required(checkpoint["git"], ("base_branch", "work_branch", "last_verified_commit"), "git")
+    for field in ("base_branch", "work_branch"):
+        if not isinstance(checkpoint["git"][field], str) or not checkpoint["git"][field].strip():
+            raise ValueError(f"git.{field} must be a nonempty string")
+    baseline = checkpoint["git"]["last_verified_commit"]
+    if baseline is not None and (not isinstance(baseline, str)
+                                 or not re.fullmatch(r"[0-9a-fA-F]{7,40}", baseline)):
+        raise ValueError("git.last_verified_commit must be null or a hex commit SHA")
     required(checkpoint["progress"], ("completed", "remaining"), "progress")
     for key in ("completed", "remaining"):
         if not isinstance(checkpoint["progress"][key], list) or not all(isinstance(x, str) for x in checkpoint["progress"][key]):
@@ -89,13 +111,22 @@ def validate(project, checkpoint):
     if not isinstance(checkpoint["blockers"], list):
         raise ValueError("blockers must be a list")
     required(checkpoint["next_action"], ("type", "description"), "next_action")
+    for name in ("type", "description"):
+        value = checkpoint["next_action"][name]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"next_action.{name} must be a nonempty string")
     required(checkpoint["verification"], ("status", "verified_at"), "verification")
     if checkpoint["verification"]["status"] not in ("verified", "unverified", "conflict"):
         raise ValueError("invalid verification status")
 
 
 def git(root, *arguments):
-    result = subprocess.run(["git", "-C", str(root), *arguments], capture_output=True, text=True, check=False, timeout=10)
+    try:
+        result = subprocess.run(["git", "-C", str(root), *arguments], capture_output=True,
+                                text=True, check=False, timeout=10,
+                                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+    except (subprocess.TimeoutExpired, OSError):
+        return None
     return result.stdout.strip() if result.returncode == 0 else None
 
 
@@ -114,18 +145,39 @@ def inspect(root):
         issues.append("Cannot inspect working tree")
     elif dirty:
         issues.append("Working tree has uncommitted changes")
+    expected_branch = checkpoint["git"]["work_branch"]
+    branch_status = "UNKNOWN"
+    if branch is None:
+        issues.append("UNKNOWN: current branch unavailable")
+    elif branch != expected_branch:
+        branch_status = "CONFLICT"
+        issues.append(f"CONFLICT: checkpoint work branch '{expected_branch}' differs from checkout '{branch}'")
+    else:
+        branch_status = "VERIFIED"
     claimed = checkpoint["git"]["last_verified_commit"]
+    baseline_status = "UNKNOWN"
+    if not claimed:
+        issues.append("UNKNOWN: checkpoint has no last_verified_commit baseline")
     exists = None
     if claimed:
-        exists = git(root, "cat-file", "-t", claimed) == "commit"
-        if not exists:
-            issues.append("Checkpoint references a commit not found locally")
+        object_type = git(root, "cat-file", "-t", claimed)
+        exists = object_type == "commit" if object_type is not None else None
+        if object_type is None:
+            issues.append("UNKNOWN: cannot inspect checkpoint commit object")
+        elif not exists:
+            baseline_status = "CONFLICT"
+            issues.append("CONFLICT: checkpoint SHA does not refer to a commit")
         elif head != claimed:
-            issues.append("Checkpoint commit differs from HEAD")
+            baseline_status = "CONFLICT"
+            issues.append("CONFLICT: checkpoint commit differs from HEAD")
+        else:
+            baseline_status = "VERIFIED"
     return {
         "project": project["project"]["id"],
         "repository": f'{project["repository"]["owner"]}/{project["repository"]["name"]}',
         "branch": branch, "head": head, "dirty": bool(dirty) if dirty is not None else None,
+        "checkpoint_branch": expected_branch, "checkpoint_branch_status": branch_status,
+        "checkpoint_baseline_status": baseline_status,
         "checkpoint_commit": claimed, "checkpoint_commit_exists": exists,
         "checkpoint": checkpoint, "issues": issues, "policies": project["policies"],
     }
@@ -138,16 +190,21 @@ def main():
     args = parser.parse_args()
     try:
         report = inspect(args.root)
-    except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+    except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
         print(json.dumps({"error": str(exc)}) if args.json else f"INVALID: {exc}")
         return 2
-    if args.json:
-        print(json.dumps(report, indent=2))
-    else:
-        print(f'VALID CONTRACT: {report["repository"]}')
-        print(f'Git: {report["branch"] or "unknown"} @ {report["head"] or "unknown"}')
-        for issue in report["issues"]:
-            print(f"WARNING: {issue}")
+    try:
+        if args.json:
+            print(json.dumps(report, indent=2, allow_nan=False))
+        else:
+            print(f'VALID CONTRACT: {report["repository"]}')
+            print(f'Git: {report["branch"] or "unknown"} @ {report["head"] or "unknown"}')
+            for issue in report["issues"]:
+                print(f"WARNING: {issue}")
+    except (TypeError, ValueError, RecursionError) as exc:
+        print(json.dumps({"error": "Cannot serialize validated context"}) if args.json
+              else "INVALID: Cannot serialize validated context")
+        return 2
     return 0
 
 

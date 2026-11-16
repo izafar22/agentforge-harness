@@ -4,8 +4,14 @@ import argparse
 import importlib.util
 import json
 import os
+import sys
+sys.dont_write_bytecode = True
 from pathlib import Path
 from urllib import request, error
+
+gh_spec = importlib.util.spec_from_file_location("github_state", Path(__file__).with_name("github_state.py"))
+github_state = importlib.util.module_from_spec(gh_spec)
+gh_spec.loader.exec_module(github_state)
 
 spec = importlib.util.spec_from_file_location("verify_context", Path(__file__).with_name("verify_context.py"))
 module = importlib.util.module_from_spec(spec)
@@ -29,22 +35,43 @@ def build(root, github=False, fetcher=github_get):
     checkpoint = state["checkpoint"]
     issues = list(state["issues"])
     remote = "NOT REQUESTED"
+    gh = None
     if github:
-        if not state["head"]:
-            data, err = None, "HEAD unavailable"
-        else:
-            data, err = fetcher(state["repository"], "commits/" + state["head"], os.getenv("GITHUB_TOKEN"))
-        remote = "VERIFIED HEAD" if data and data.get("sha") == state["head"] else "UNKNOWN"
-        if remote == "UNKNOWN":
-            issues.append("GitHub HEAD verification unavailable or mismatched: " + (err or "mismatch"))
-    readiness = "REQUIRES INVESTIGATION" if issues else "LOCAL STATE VERIFIED; PR/CI UNKNOWN"
+        gh = github_state.reconcile(state["repository"], state["branch"], state["head"],
+                                    token=os.getenv("GITHUB_TOKEN"),
+                                    fetch=(github_state.api_get if fetcher is github_get else
+                                           lambda repo, path, token: fetcher(repo, path, token)))
+        remote = gh["head"]
+        issues.extend(gh["issues"])
+    if any(issue.startswith("CONFLICT:") for issue in issues):
+        readiness = "CONFLICT — INVESTIGATE BEFORE CONTINUING"
+    elif issues:
+        # Every local or remote inspection issue is disqualifying for fully
+        # verified readiness (including dirty and unreadable worktrees).
+        readiness = "PARTIAL — INVESTIGATE LOCAL OR REMOTE EVIDENCE"
+    elif not github:
+        readiness = "LOCAL CHECKS COMPLETE — GITHUB NOT REQUESTED"
+    elif gh["ci"] == "PENDING":
+        readiness = "PENDING — WAIT FOR WORKFLOW COMPLETION"
+    elif gh["ci"] == "FAILED OR INCOMPLETE":
+        readiness = "FAILED — INVESTIGATE WORKFLOW RESULTS"
+    elif gh["head"] != "VERIFIED" or gh["pull_requests"] != "VERIFIED" or gh["ci"] != "VERIFIED":
+        readiness = "PARTIAL — REMOTE EVIDENCE UNKNOWN OR AMBIGUOUS"
+    else:
+        readiness = "GIT/GITHUB FACTS VERIFIED — HUMAN REVIEW STILL REQUIRED"
     lines = [
         f'# Resume: {state["project"]}', "",
         f'**Task:** {checkpoint["task"]["id"]} — {checkpoint["task"]["title"]}',
         f'**Checkpoint status (claim):** {checkpoint["task"]["status"]}',
         f'**Local Git:** {state["branch"] or "unknown"} @ {state["head"] or "unknown"}',
+        f'**Checkpoint branch:** {state["checkpoint_branch"]} ({state["checkpoint_branch_status"]})',
+        f'**Checkpoint baseline:** {state["checkpoint_commit"] or "not recorded"} ({state["checkpoint_baseline_status"]})',
         f"**Remote verification:** {remote}",
-        f"**Readiness:** {readiness}", "", "## Reported completed work",
+        f"**Readiness:** {readiness}", "", "## GitHub evidence",
+        ("PR discovery: " + gh["pull_requests"] + " | PR: " + str(gh["pr"]) +
+         " | SHA-level CI: " + gh["ci"] + " (" + str(gh["ci_conclusion"]) + ")" if gh else "Not requested; PR and CI remain UNKNOWN"),
+        "Workflow success is not proof of required checks, review approval, or merge authorization.",
+        "", "## Reported completed work",
     ]
     lines.extend("- " + item for item in checkpoint["progress"]["completed"])
     lines.extend(["", "## Reported remaining work"])
@@ -52,9 +79,9 @@ def build(root, github=False, fetcher=github_get):
     lines.extend(["", "## Issues / unknowns"])
     lines.extend("- " + issue for issue in issues)
     if not issues:
-        lines.append("- No local inconsistencies; PR/CI and progress claims remain unverified.")
-    lines.extend(["", "## Next reported action", checkpoint["next_action"]["description"],
-                  "", "## Guardrails", "- Verify PR/CI facts independently.",
+        lines.append("- No detected evidence conflicts; checkpoint progress remains unverified.")
+    lines.extend(["", "## Next reported action (not automatically authorized)", checkpoint["next_action"]["description"],
+                  "", "## Guardrails", "- Verify required checks and branch protections independently.",
                   "- Require explicit human approval before merge or deployment.",
                   "- Treat checkpoint progress as claims, not independent proof."])
     return "\n".join(lines) + "\n"
@@ -67,7 +94,7 @@ def main():
     args = parser.parse_args()
     try:
         print(build(args.root, args.github))
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, RuntimeError) as exc:
         print(f"INVALID: {exc}")
         raise SystemExit(2)
 
