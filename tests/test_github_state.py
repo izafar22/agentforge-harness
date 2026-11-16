@@ -82,8 +82,8 @@ class GitHubReconciliationTests(unittest.TestCase):
         self.assertEqual(result["ci"], "FAILED OR INCOMPLETE")
 
     def test_second_pr_page_ambiguity(self):
-        p = {"head": {"sha": SHA, "ref": "feature/test", "repo": {"full_name": "example/repo"}}, "number": 1, "draft": False, "state": "open"}
-        other = {"head": {"sha": "b" * 40}, "number": 2, "draft": False, "state": "open", "merged_at": None}
+        p = {"head": {"sha": SHA, "ref": "feature/test", "repo": {"full_name": "example/repo"}}, "number": 1, "draft": False, "state": "open", "merged_at": None}
+        other = {"head": {"sha": "b" * 40, "ref": "feature/test", "repo": {"full_name": "example/repo"}}, "number": 2, "draft": False, "state": "open", "merged_at": None}
         def second(repo, path, token):
             if path.startswith("pulls?"):
                 return ([p] + [dict(other, number=i) for i in range(2, 101)] if "&page=1" in path else [dict(p, number=101)]), None
@@ -363,6 +363,108 @@ class GitHubReconciliationTests(unittest.TestCase):
             payload, issue = gh.api_get("example/repo", "commits/" + SHA)
         self.assertIsNone(payload)
         self.assertIn("RecursionError", issue)
+
+
+    def test_pr_short_page_link_next_cannot_verify_partial_collection(self):
+        match = {"head": {"sha": SHA, "ref": "feature/test",
+                          "repo": {"full_name": "example/repo"}},
+                 "number": 3, "state": "open", "draft": True, "merged_at": None}
+        def incomplete(repo, path, token):
+            if path.startswith("pulls?"):
+                if "&page=1" in path:
+                    batch = gh.GitHubArray([match])
+                    batch.github_link = '<https://api.github.com/repos/example/repo/pulls?page=2>; rel="next"'
+                    return batch, None
+                return None, "second page unavailable"
+            return fake(repo, path, token)
+        result = gh.reconcile("example/repo", "feature/test", SHA, fetch=incomplete)
+        self.assertEqual(result["pull_requests"], "UNKNOWN")
+        self.assertTrue(any("page 2" in problem for problem in result["issues"]))
+
+    def test_ci_total_count_one_with_next_link_is_unknown(self):
+        def contradictory(repo, path, token):
+            if path.startswith("actions/runs?"):
+                batch = gh.GitHubObject({"total_count": 1, "workflow_runs": [
+                    {"id": 1, "head_sha": SHA, "status": "completed",
+                     "conclusion": "success"}]})
+                batch.github_link = '<https://api.github.com/repos/example/repo/actions/runs?page=2>; rel="next"'
+                return batch, None
+            return fake(repo, path, token)
+        result = gh.reconcile("example/repo", "feature/test", SHA, fetch=contradictory)
+        self.assertEqual(result["ci"], "UNKNOWN")
+
+    def test_api_get_preserves_link_header(self):
+        import io
+        from unittest.mock import patch
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def geturl(self):
+                return "https://api.github.com/repos/example/repo/pulls?page=1"
+            headers = {"Link": '<https://api.github.com/repos/example/repo/pulls?page=2>; rel="next"'}
+        class Opener:
+            def open(self, *args, **kwargs):
+                return Response(b"[]")
+        with patch.object(gh.request, "build_opener", return_value=Opener()):
+            payload, err = gh.api_get("example/repo", "pulls?page=1")
+        self.assertIsNone(err)
+        self.assertTrue(gh.next_link_present(payload.github_link))
+
+    def test_malformed_pr_entry_other_than_match_unknown(self):
+        def invalid(repo, path, token):
+            if path.startswith("pulls?"):
+                value, _ = fake(repo, path, token)
+                return value + [{"head": {"sha": ""}, "number": 2,
+                                 "draft": False, "state": "open", "merged_at": None}], None
+            return fake(repo, path, token)
+        evidence = gh.reconcile("example/repo", "feature/test", SHA, fetch=invalid)
+        self.assertEqual(evidence["pull_requests"], "UNKNOWN")
+        self.assertTrue(evidence["issues"])
+
+    def test_closed_draft_merged_pr_unknown(self):
+        def invalid(repo, path, token):
+            if path.startswith("pulls?"):
+                return [{"head": {"sha": SHA, "ref": "feature/test",
+                                  "repo": {"full_name": "example/repo"}},
+                         "number": 3, "state": "closed", "draft": True,
+                         "merged_at": "2026-11-15T17:44:40Z"}], None
+            return fake(repo, path, token)
+        self.assertEqual(
+            gh.reconcile("example/repo", "feature/test", SHA, fetch=invalid)["pull_requests"],
+            "UNKNOWN")
+
+    def test_explicit_false_merged_with_timestamp_unknown(self):
+        def invalid(repo, path, token):
+            if path.startswith("pulls?"):
+                return [{"head": {"sha": SHA, "ref": "feature/test",
+                                  "repo": {"full_name": "example/repo"}},
+                         "number": 3, "state": "closed", "draft": False, "merged": False,
+                         "merged_at": "2026-11-15T17:44:40Z"}], None
+            return fake(repo, path, token)
+        self.assertEqual(
+            gh.reconcile("example/repo", "feature/test", SHA, fetch=invalid)["pull_requests"],
+            "UNKNOWN")
+
+    def test_nonstandard_json_nan_rejected(self):
+        import io
+        from unittest.mock import patch
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def geturl(self):
+                return "https://api.github.com/repos/example/repo/commits/" + SHA
+            headers = {}
+        class Opener:
+            def open(self, *args, **kwargs):
+                return Response(('{"sha":"' + SHA + '","bad":NaN}').encode())
+        with patch.object(gh.request, "build_opener", return_value=Opener()):
+            payload, err = gh.api_get("example/repo", "commits/" + SHA)
+        self.assertIsNone(payload)
+        self.assertIn("ValueError", err)
 
 if __name__ == "__main__":
     unittest.main()

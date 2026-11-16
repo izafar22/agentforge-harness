@@ -18,6 +18,38 @@ def reject_duplicate_json_keys(pairs):
     return result
 
 
+class GitHubObject(dict):
+    """A decoded object retaining the HTTP Link header."""
+    github_link = ""
+
+
+class GitHubArray(list):
+    """A decoded array retaining the HTTP Link header."""
+    github_link = ""
+
+
+def reject_non_json_constant(value):
+    raise ValueError("Nonstandard JSON constant: " + value)
+
+
+def next_link_present(header):
+    """Return True/False, or None if the Link header is malformed."""
+    if not isinstance(header, str):
+        return None
+    if not header:
+        return False
+    next_found = False
+    for entry in header.split(","):
+        match = re.fullmatch(r'\s*<https://api\.github\.com/[^>]+>\s*;\s*rel="(next|prev|first|last)"\s*', entry)
+        if match is None:
+            return None
+        if match.group(1) == "next":
+            if next_found:
+                return None
+            next_found = True
+    return next_found
+
+
 PAGE_SIZE = 100
 MAX_PAGES = 20
 
@@ -42,7 +74,16 @@ def api_get(repo, path, token=None):
         with opener.open(request.Request(url, headers=headers), timeout=10) as response:
             if response.geturl() != url:
                 return None, "GitHub API origin changed"
-            return json.load(response, object_pairs_hook=reject_duplicate_json_keys), None
+            payload = json.load(response, object_pairs_hook=reject_duplicate_json_keys,
+                                parse_constant=reject_non_json_constant)
+            # Retain Link metadata without changing the existing (payload, error) API.
+            if isinstance(payload, dict):
+                payload = GitHubObject(payload)
+            elif isinstance(payload, list):
+                payload = GitHubArray(payload)
+            if isinstance(payload, (GitHubObject, GitHubArray)):
+                payload.github_link = response.headers.get("Link", "") if hasattr(response, "headers") else ""
+            return payload, None
     except (error.URLError, TimeoutError, ValueError, OSError, HTTPException, RecursionError) as exc:
         return None, "GitHub API request failed: " + type(exc).__name__
 
@@ -60,6 +101,9 @@ def _pages(repo, endpoint, token, fetch, collection):
             return None, f"GitHub {collection} page {page} interrupted: {type(exc).__name__}"
         if err:
             return None, f"GitHub {collection} page {page} unavailable: {err}"
+        has_next = next_link_present(getattr(payload, "github_link", ""))
+        if has_next is None:
+            return None, f"Malformed {collection} Link header on page {page}"
         if collection == "pulls":
             batch = payload
         else:
@@ -86,6 +130,10 @@ def _pages(repo, endpoint, token, fetch, collection):
             if len(set(ids)) != len(ids) or any(i in previous for i in ids):
                 return None, f"Duplicate workflow run ID on page {page}; completeness unverified"
         items.extend(batch)
+        if has_next:
+            if collection == "runs" and len(items) >= expected_total:
+                return None, f"Contradictory {collection} Link continuation and total_count"
+            continue
         if collection == "pulls":
             if len(batch) < PAGE_SIZE:
                 return items, None
@@ -120,7 +168,27 @@ def valid_pr_head(pr, repo, branch):
     return (source.get("ref") == branch
             and isinstance(source_repo, dict)
             and source_repo.get("full_name") == repo
-            and isinstance(source.get("sha"), str))
+            and isinstance(source.get("sha"), str)
+            and re.fullmatch(r"[0-9a-fA-F]{40}", source["sha"]) is not None)
+
+
+def valid_pr_record(pr, repo, branch):
+    """Validate every returned PR, not only the record matching HEAD."""
+    if not valid_pr_head(pr, repo, branch):
+        return False
+    if (type(pr.get("number")) is not int or pr["number"] <= 0
+        or pr.get("state") not in ("open", "closed")
+        or type(pr.get("draft")) is not bool
+        or "merged_at" not in pr
+        or not valid_github_timestamp(pr["merged_at"])):
+        return False
+    merged_at = pr["merged_at"]
+    if (pr["state"] == "open" and merged_at is not None) or (merged_at and pr["draft"]):
+        return False
+    if "merged" in pr and (type(pr["merged"]) is not bool
+                           or pr["merged"] != (merged_at is not None)):
+        return False
+    return True
 
 
 def reconcile(repo, branch, head, token=None, fetch=api_get):
@@ -145,30 +213,17 @@ def reconcile(repo, branch, head, token=None, fetch=api_get):
     prs, err = _pages(repo, query, token, fetch, "pulls")
     if err:
         evidence["issues"].append("PR verification UNKNOWN: " + err)
-    elif any(not isinstance(p.get("head"), dict) or not isinstance(p["head"].get("sha"), str)
-             for p in prs):
-        evidence["issues"].append("PR verification UNKNOWN: malformed head metadata")
-    elif any(type(p.get("number")) is not int or p["number"] <= 0 for p in prs):
-        evidence["issues"].append("PR verification UNKNOWN: missing or invalid PR number")
+    elif any(not valid_pr_record(p, repo, branch) for p in prs):
+        evidence["issues"].append("PR verification UNKNOWN: malformed or contradictory PR entry")
     elif len({p["number"] for p in prs}) != len(prs):
         evidence["issues"].append("PR verification UNKNOWN: duplicate PR number in response")
     else:
         matches = [p for p in prs if p["head"]["sha"] == head]
         if len(matches) == 1:
             p = matches[0]
-            if (not valid_pr_head(p, repo, branch)
-                or type(p.get("number")) is not int or p["number"] <= 0
-                or p.get("state") not in ("open", "closed")
-                or type(p.get("draft")) is not bool
-                or "merged_at" not in p
-                or not valid_github_timestamp(p["merged_at"])
-                or (p["state"] == "open" and p["merged_at"] is not None)
-                or (p["merged_at"] is not None and p["state"] != "closed")):
-                evidence["issues"].append("PR verification UNKNOWN: invalid matching PR fields")
-            else:
-                evidence["pull_requests"] = "VERIFIED"
-                evidence["pr"] = {"number": p["number"], "state": p["state"],
-                                  "draft": p["draft"], "merged_at": p.get("merged_at")}
+            evidence["pull_requests"] = "VERIFIED"
+            evidence["pr"] = {"number": p["number"], "state": p["state"],
+                              "draft": p["draft"], "merged_at": p["merged_at"]}
         elif not matches:
             evidence["pull_requests"] = "NONE FOUND"
             evidence["issues"].append("No PR at this SHA found in complete branch result set")

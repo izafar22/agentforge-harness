@@ -153,5 +153,36 @@ class RecoveryStateTests(unittest.TestCase):
         self.assertIsNone(state["checkpoint_commit_exists"])
         self.assertFalse(any("CONFLICT: checkpoint" in x for x in state["issues"]))
 
+
+    def test_excessively_nested_checkpoint_rejected_before_output(self):
+        project = verify.parse_simple_yaml((ROOT / "harness/project.yaml").read_text())
+        checkpoint = verify.parse_simple_yaml((ROOT / "harness/checkpoint.yaml").read_text())
+        level = checkpoint
+        for index in range(1100):
+            level["extra"] = {}
+            level = level["extra"]
+        with self.assertRaisesRegex(ValueError, "nesting or size limits"):
+            verify.validate(project, checkpoint)
+
+    def test_deep_checkpoint_verifier_cli_exits_invalid(self):
+        from unittest.mock import patch
+        import io
+        from contextlib import redirect_stdout
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "harness").mkdir()
+            (root / "harness/project.yaml").write_text(
+                (ROOT / "harness/project.yaml").read_text())
+            checkpoint = (ROOT / "harness/checkpoint.yaml").read_text()
+            checkpoint += "extra:\n" + "".join(("  " * n) + f"node{n}:\n"
+                                                    for n in range(40))
+            (root / "harness/checkpoint.yaml").write_text(checkpoint)
+            with patch("sys.argv", ["verify_context.py", "--root", str(root), "--json"]):
+                with redirect_stdout(io.StringIO()) as output:
+                    code = verify.main()
+        self.assertEqual(code, 2)
+        self.assertIn("error", output.getvalue())
+
 if __name__ == "__main__":
     unittest.main()

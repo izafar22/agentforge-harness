@@ -67,6 +67,20 @@ def required(mapping, keys, label):
 
 
 def validate(project, checkpoint):
+    """Reject deeply nested or oversized input before JSON report serialization."""
+    for label, value in (("project", project), ("checkpoint", checkpoint)):
+        stack = [(value, 0)]
+        count = 0
+        while stack:
+            node, depth = stack.pop()
+            count += 1
+            if depth > 32 or count > 10000:
+                raise ValueError(f"{label} exceeds supported nesting or size limits")
+            if isinstance(node, dict):
+                stack.extend((child, depth + 1) for child in node.values())
+            elif isinstance(node, list):
+                stack.extend((child, depth + 1) for child in node)
+
     required(project, ("schema_version", "project", "repository", "policies"), "project")
     required(checkpoint, ("schema_version", "task", "git", "progress", "blockers", "next_action", "verification"), "checkpoint")
     for name, obj in (("project", project), ("checkpoint", checkpoint)):
@@ -179,13 +193,18 @@ def main():
     except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
         print(json.dumps({"error": str(exc)}) if args.json else f"INVALID: {exc}")
         return 2
-    if args.json:
-        print(json.dumps(report, indent=2))
-    else:
-        print(f'VALID CONTRACT: {report["repository"]}')
-        print(f'Git: {report["branch"] or "unknown"} @ {report["head"] or "unknown"}')
-        for issue in report["issues"]:
-            print(f"WARNING: {issue}")
+    try:
+        if args.json:
+            print(json.dumps(report, indent=2, allow_nan=False))
+        else:
+            print(f'VALID CONTRACT: {report["repository"]}')
+            print(f'Git: {report["branch"] or "unknown"} @ {report["head"] or "unknown"}')
+            for issue in report["issues"]:
+                print(f"WARNING: {issue}")
+    except (TypeError, ValueError, RecursionError) as exc:
+        print(json.dumps({"error": "Cannot serialize validated context"}) if args.json
+              else "INVALID: Cannot serialize validated context")
+        return 2
     return 0
 
 
