@@ -57,7 +57,9 @@ def link_pages(header, repo, endpoint, page):
         number = params.pop("page", None)
         if (number is None or len(number) != 1
             or not number[0].isdigit() or int(number[0]) < 1
-            or any(key not in {**expected, "per_page": [str(PAGE_SIZE)]}\n                   or {**expected, "per_page": [str(PAGE_SIZE)]}[key] != val\n                   for key, val in params.items())):
+            or any(key not in {**expected, "per_page": [str(PAGE_SIZE)]}
+                   or {**expected, "per_page": [str(PAGE_SIZE)]}[key] != val
+                   for key, val in params.items())):
             return None
         links[relation] = int(number[0])
     if ("next" in links and links["next"] != page + 1
