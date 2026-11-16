@@ -466,5 +466,80 @@ class GitHubReconciliationTests(unittest.TestCase):
         self.assertIsNone(payload)
         self.assertIn("ValueError", err)
 
+
+    def test_last_link_without_next_cannot_verify_incomplete_prs(self):
+        def fake_pages(repo, path, token):
+            if path.startswith("pulls?"):
+                pr = {"head": {"sha": SHA, "ref": "feature/test",
+                               "repo": {"full_name": "example/repo"}},
+                      "number": 1, "state": "open", "draft": True, "merged_at": None}
+                page = 1 if "&page=1" in path else 2
+                batch = gh.GitHubArray([pr] if page == 1 else [])
+                batch.github_link = (
+                    '<https://api.github.com/repos/example/repo/pulls?page=2>; rel="next"'
+                    if page == 1 else
+                    '<https://api.github.com/repos/example/repo/pulls?page=3>; rel="last"')
+                return batch, None
+            return fake(repo, path, token)
+        result = gh.reconcile("example/repo", "feature/test", SHA, fetch=fake_pages)
+        self.assertEqual(result["pull_requests"], "UNKNOWN")
+
+    def test_next_page_skipping_is_unknown(self):
+        def skipped(repo, path, token):
+            if path.startswith("pulls?"):
+                batch = gh.GitHubArray([])
+                batch.github_link = '<https://api.github.com/repos/example/repo/pulls?page=3>; rel="next"'
+                return batch, None
+            return fake(repo, path, token)
+        self.assertEqual(
+            gh.reconcile("example/repo", "feature/test", SHA, fetch=skipped)["pull_requests"],
+            "UNKNOWN")
+
+    def test_multiple_link_header_values_preserved(self):
+        import io
+        from email.message import Message
+        from unittest.mock import patch
+        class Response(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def geturl(self): return "https://api.github.com/repos/example/repo/pulls?page=1"
+            headers = Message()
+        Response.headers.add_header("Link", '<https://api.github.com/repos/example/repo/pulls?page=1>; rel="first"')
+        Response.headers.add_header("Link", '<https://api.github.com/repos/example/repo/pulls?page=2>; rel="next"')
+        class Opener:
+            def open(self, *args, **kwargs): return Response(b"[]")
+        with patch.object(gh.request, "build_opener", return_value=Opener()):
+            payload, err = gh.api_get("example/repo", "pulls?page=1")
+        self.assertIsNone(err)
+        self.assertIn('rel="first"', payload.github_link)
+        self.assertIn('rel="next"', payload.github_link)
+
+    def test_case_variant_shas_are_ambiguous(self):
+        mixed = "abcdef" * 6 + "abcd"
+        def variants(repo, path, token):
+            if path.startswith("commits/"):
+                return {"sha": mixed}, None
+            if path.startswith("pulls?"):
+                return [{"head": {"sha": value, "ref": "feature/test",
+                                  "repo": {"full_name": "example/repo"}},
+                         "number": number, "state": "open",
+                         "draft": True, "merged_at": None}
+                        for number, value in ((1, mixed), (2, mixed.upper()))], None
+            return fake(repo, path, token)
+        result = gh.reconcile("example/repo", "feature/test", mixed, fetch=variants)
+        self.assertEqual(result["pull_requests"], "AMBIGUOUS")
+
+    def test_closed_pr_with_null_closed_at_is_unknown(self):
+        def contradictory(repo, path, token):
+            if path.startswith("pulls?"):
+                return [{"head": {"sha": SHA, "ref": "feature/test",
+                                  "repo": {"full_name": "example/repo"}},
+                         "number": 1, "state": "closed", "draft": False,
+                         "merged_at": "2026-11-15T17:44:40Z", "closed_at": None}], None
+            return fake(repo, path, token)
+        self.assertEqual(
+            gh.reconcile("example/repo", "feature/test", SHA, fetch=contradictory)["pull_requests"],
+            "UNKNOWN")
+
 if __name__ == "__main__":
     unittest.main()

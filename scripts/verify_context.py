@@ -190,7 +190,7 @@ def main():
     args = parser.parse_args()
     try:
         report = inspect(args.root)
-    except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+    except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
         print(json.dumps({"error": str(exc)}) if args.json else f"INVALID: {exc}")
         return 2
     try:

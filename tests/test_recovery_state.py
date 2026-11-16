@@ -184,5 +184,28 @@ class RecoveryStateTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("error", output.getvalue())
 
+
+    def test_context_verifier_handles_symlink_loop(self):
+        import io
+        from contextlib import redirect_stdout
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            loop = root / "loop"
+            loop.symlink_to(loop)
+            with patch("sys.argv", ["verify_context.py", "--root", str(loop), "--json"]):
+                with redirect_stdout(io.StringIO()) as output:
+                    code = verify.main()
+        self.assertEqual(code, 2)
+        self.assertIn("error", output.getvalue())
+
+    def test_resume_handles_symlink_loop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = Path(tmp) / "loop"
+            loop.symlink_to(loop)
+            with patch("sys.argv", ["generate_resume.py", "--root", str(loop)]):
+                with self.assertRaises(SystemExit) as outcome:
+                    resume.main()
+        self.assertEqual(outcome.exception.code, 2)
+
 if __name__ == "__main__":
     unittest.main()

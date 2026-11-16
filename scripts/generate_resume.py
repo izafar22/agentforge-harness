@@ -94,7 +94,7 @@ def main():
     args = parser.parse_args()
     try:
         print(build(args.root, args.github))
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, RuntimeError) as exc:
         print(f"INVALID: {exc}")
         raise SystemExit(2)
 
